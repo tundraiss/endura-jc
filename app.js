@@ -19,6 +19,14 @@ function render(){
  const late=active.filter(j=>urgency(j)[0]==='overdue');
  const urgent=active.filter(j=>urgency(j)[0]==='urgent');
  const pending=notices.filter(n=>['draft','approved','pending_integration'].includes(n.status));
+ const badge=$('reviewBadge');
+ if(badge){
+   badge.textContent=String(pending.length);
+   badge.classList.toggle('hide',pending.length===0);
+   badge.setAttribute('aria-label',`${pending.length} messages awaiting review`);
+   const reviewTab=document.querySelector('[data-tab="review"]');
+   if(reviewTab)reviewTab.setAttribute('aria-label',pending.length?`Review, ${pending.length} messages awaiting review`:'Review, no pending messages');
+ }
  const metrics=[['Active jobs',active.length,'◫',''],['Due soon',urgent.length,'◷',''],['Overdue',late.length,'!','metric-danger'],['Ready to collect',active.filter(j=>j.status==='Ready for Collection').length,'✓','metric-ready'],['Review messages',pending.length,'✉','metric-review']];
  $('stats').innerHTML=metrics.map(([name,count,icon,cls])=>`<div class="metric ${cls}"><span class="metric-icon" aria-hidden="true">${icon}</span><div class="metric-value">${count}</div><div class="metric-label">${name}</div></div>`).join('');
  $('dashboardDate').textContent=new Intl.DateTimeFormat('en-ZA',{weekday:'long',day:'numeric',month:'long',year:'numeric'}).format(new Date());
