@@ -1,1 +1,0 @@
-ENDURA JC v3.1 local demo. Delay WhatsApps require review. Moving to Ready for Collection records an unsent collection event; automatic sending of invoice PDF requires a secure server, Sage API integration, and WhatsApp Business Platform. Upload invoice PDF locally; no invoice URL field. Do not use for live customer notifications until integrations are deployed.
