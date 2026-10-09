@@ -4,12 +4,13 @@ const $=id=>document.getElementById(id);
 const configured=SUPABASE_URL.startsWith('https://')&&SUPABASE_PUBLISHABLE_KEY!=='PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY';
 let db=null, jobs=[], customers=[], items=[], notices=[];
 let editRemoved=new Set();
+let plannerWeekOffset=0;
 const statuses=['New','Pretreatment','Powder Coating','Curing / QC','Ready for Collection','Collected'];
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const msg=x=>{const t=$('toast');t.textContent=x;t.style.display='block';setTimeout(()=>t.style.display='none',5500)};
 const check=(res)=>{if(res.error)throw res.error;return res.data};
 function urgency(j){if(['Collected','Ready for Collection'].includes(j.status))return ['ok',j.status];const days=Math.ceil((new Date(j.due_date+'T23:59:59')-new Date())/86400000);return days<0?['overdue',`${Math.abs(days)} day(s) overdue`]:days<=2?['urgent',days===0?'Due today':`Due in ${days} day(s)`]:['ok',`Due in ${days} day(s)`]}
-function show(tab){for(const el of ['dashboard','new','review','collected'])$(el).classList.toggle('hide',el!==tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab))}
+function show(tab){for(const el of ['dashboard','new','planner','review','collected'])$(el).classList.toggle('hide',el!==tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab))}
 function itemRow(){const d=document.createElement('div');d.className='item';d.innerHTML=`<div class="row"><div><label>Item</label><input class="desc" required placeholder="Steel brackets"></div><div><label>Quantity</label><input class="qty" type="number" min="1" value="1" required></div><div><label>Colour</label><input class="colour" placeholder="Matt black"></div><div><label>Dimensions</label><input class="dimensions" placeholder="L x W x H"></div><div><label>Price (R)</label><input class="price" type="number" min="0" step="0.01" value="0"></div><button type="button" class="secondary remove">Remove</button></div>`;d.querySelector('.remove').onclick=()=>{if($('items').children.length>1)d.remove()};$('items').appendChild(d)}
 async function load(){jobs=check(await db.from('jobs').select('*').order('created_at',{ascending:false}));customers=check(await db.from('customers').select('*'));items=check(await db.from('job_items').select('*'));notices=check(await db.from('notifications').select('*'));render()}
 function whatsappPhone(raw){let p=String(raw||'').replace(/\D/g,'');if(p.startsWith('00'))p=p.slice(2);if(p.startsWith('0'))p='27'+p.slice(1);if(p.length===9)p='27'+p;return /^\d{10,15}$/.test(p)?p:null}
@@ -36,10 +37,31 @@ function render(){
  const needs=[...late,...urgent].sort((a,b)=>a.due_date.localeCompare(b.due_date)).slice(0,5);
  $('attention').innerHTML=needs.map(j=>`<div class="attention-row"><div class="attention-title">${esc(j.job_number)} · ${esc(customers.find(c=>c.id===j.customer_id)?.name||'Customer')}</div><div class="attention-sub">${esc(urgency(j)[1])} · ${esc(j.status)}</div></div>`).join('')||'<div class="empty">No urgent jobs right now.</div>';
  renderJobList();
+ renderPlanner();
  $('archive').innerHTML=jobs.filter(j=>j.status==='Collected').map(jobHTML).join('')||'<p class="muted">No collected jobs yet.</p>';
  $('reviews').innerHTML=pending.map(reviewHTML).join('')||'<p class="muted">No messages awaiting review.</p>';
  $('reviewHistory').innerHTML=notices.filter(n=>['sent','failed'].includes(n.status)).map(n=>`<div class="job"><strong>${esc(jobs.find(j=>j.id===n.job_id)?.job_number||'Job')}</strong> — ${esc(n.kind)} · ${n.status==='sent'?'Marked sent':'Dismissed'}<p class="muted">${esc(n.message)}</p></div>`).join('')||'<p class="muted">No reviewed messages yet.</p>';
 }
+function localISO(date){const y=date.getFullYear(),m=String(date.getMonth()+1).padStart(2,'0'),d=String(date.getDate()).padStart(2,'0');return `${y}-${m}-${d}`}
+function weekStart(offset){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()-((d.getDay()+6)%7)+offset*7);return d}
+function renderPlanner(){
+ const start=weekStart(plannerWeekOffset),end=new Date(start);end.setDate(start.getDate()+6);
+ const dateFormat=new Intl.DateTimeFormat('en-ZA',{day:'numeric',month:'short'});
+ $('plannerRange').textContent=`${dateFormat.format(start)} – ${dateFormat.format(end)} ${end.getFullYear()}`;
+ const today=localISO(new Date()),startISO=localISO(start),endISO=localISO(end);
+ const active=jobs.filter(j=>j.status!=='Collected');
+ const inWeek=active.filter(j=>j.due_date>=startISO&&j.due_date<=endISO);
+ const overdue=active.filter(j=>j.due_date<today&&!['Ready for Collection'].includes(j.status));
+ const dueToday=active.filter(j=>j.due_date===today);
+ $('plannerSummary').innerHTML=`<div class="planner-pill"><strong>${inWeek.length}</strong> Due this week</div><div class="planner-pill"><strong>${dueToday.length}</strong> Due today</div><div class="planner-pill"><strong>${overdue.length}</strong> Overdue</div>`;
+ const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d});
+ const dayName=new Intl.DateTimeFormat('en-ZA',{weekday:'short'});
+ $('plannerDays').innerHTML=days.map(d=>{const iso=localISO(d),dayJobs=inWeek.filter(j=>j.due_date===iso).sort((a,b)=>a.job_number.localeCompare(b.job_number));return `<div class="planner-day ${iso===today?'today':''}"><h3>${dayName.format(d)} ${d.getDate()}</h3><div class="planner-day-count">${dayJobs.length} job${dayJobs.length===1?'':'s'} due</div>${dayJobs.map(j=>{const c=customers.find(c=>c.id===j.customer_id);const late=iso<today&&j.status!=='Ready for Collection';return `<div class="planner-job ${late?'planner-late':j.status==='Ready for Collection'?'planner-ready':''}"><strong>${esc(j.job_number)}</strong><span>${esc(c?.name||'Customer')}</span><span>${esc(j.status)}</span><button class="secondary" data-edit="${j.id}">Edit job</button></div>`}).join('')||'<div class="planner-empty">No jobs due</div>'}</div>`}).join('');
+ $('plannerOverdue').innerHTML=overdue.sort((a,b)=>a.due_date.localeCompare(b.due_date)).map(j=>`<div class="planner-overdue-row"><div><strong>${esc(j.job_number)}</strong> · ${esc(customers.find(c=>c.id===j.customer_id)?.name||'Customer')}<div class="muted">Due ${esc(j.due_date)} · ${esc(j.status)}</div></div><button class="secondary" data-edit="${j.id}">Edit job</button></div>`).join('')||'<p class="muted">No overdue jobs.</p>';
+}
+$('plannerPrev').onclick=()=>{plannerWeekOffset--;renderPlanner()};
+$('plannerNext').onclick=()=>{plannerWeekOffset++;renderPlanner()};
+$('plannerToday').onclick=()=>{plannerWeekOffset=0;renderPlanner()};
 function renderJobList(){
  const q=($('jobSearch')?.value||'').trim().toLowerCase();
  const visible=jobs.filter(j=>j.status!=='Collected').filter(j=>{const c=customers.find(c=>c.id===j.customer_id);const lines=items.filter(i=>i.job_id===j.id);return [j.job_number,j.status,c?.name,c?.phone,...lines.flatMap(i=>[i.description,i.colour])].join(' ').toLowerCase().includes(q)});
