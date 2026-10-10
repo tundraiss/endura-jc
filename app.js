@@ -2,7 +2,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY } from './config.js';
 const $=id=>document.getElementById(id);
 const configured=SUPABASE_URL.startsWith('https://')&&SUPABASE_PUBLISHABLE_KEY!=='PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY';
-let db=null, jobs=[], customers=[], items=[], notices=[], stagePlans=[];
+let db=null, jobs=[], customers=[], items=[], notices=[], stagePlans=[], ovenSettings={oven_count:2,loads_per_oven_per_day:1};
 let editRemoved=new Set();
 let plannerWeekOffset=0;
 const statuses=['New','Pretreatment','Powder Coating','Curing / QC','Ready for Collection','Collected'];
@@ -12,7 +12,7 @@ const check=(res)=>{if(res.error)throw res.error;return res.data};
 function urgency(j){if(['Collected','Ready for Collection'].includes(j.status))return ['ok',j.status];const days=Math.ceil((new Date(j.due_date+'T23:59:59')-new Date())/86400000);return days<0?['overdue',`${Math.abs(days)} day(s) overdue`]:days<=2?['urgent',days===0?'Due today':`Due in ${days} day(s)`]:['ok',`Due in ${days} day(s)`]}
 function show(tab){for(const el of ['dashboard','new','planner','review','collected'])$(el).classList.toggle('hide',el!==tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab))}
 function itemRow(){const d=document.createElement('div');d.className='item';d.innerHTML=`<div class="row"><div><label>Item</label><input class="desc" required placeholder="Steel brackets"></div><div><label>Quantity</label><input class="qty" type="number" min="1" value="1" required></div><div><label>Colour</label><input class="colour" placeholder="Matt black"></div><div><label>Dimensions</label><input class="dimensions" placeholder="L x W x H"></div><div><label>Price (R)</label><input class="price" type="number" min="0" step="0.01" value="0"></div><button type="button" class="secondary remove">Remove</button></div>`;d.querySelector('.remove').onclick=()=>{if($('items').children.length>1)d.remove()};$('items').appendChild(d)}
-async function load(){jobs=check(await db.from('jobs').select('*').order('created_at',{ascending:false}));customers=check(await db.from('customers').select('*'));items=check(await db.from('job_items').select('*'));notices=check(await db.from('notifications').select('*'));stagePlans=check(await db.from('job_stage_schedule').select('*'));render()}
+async function load(){jobs=check(await db.from('jobs').select('*').order('created_at',{ascending:false}));customers=check(await db.from('customers').select('*'));items=check(await db.from('job_items').select('*'));notices=check(await db.from('notifications').select('*'));stagePlans=check(await db.from('job_stage_schedule').select('*'));const settings=check(await db.from('oven_capacity_settings').select('*').eq('id',1).single());ovenSettings=settings;render()}
 function whatsappPhone(raw){let p=String(raw||'').replace(/\D/g,'');if(p.startsWith('00'))p=p.slice(2);if(p.startsWith('0'))p='27'+p.slice(1);if(p.length===9)p='27'+p;return /^\d{10,15}$/.test(p)?p:null}
 function reviewHTML(n){const j=jobs.find(x=>x.id===n.job_id),c=customers.find(x=>x.id===j?.customer_id)||{},phone=whatsappPhone(c.phone);const kind=n.kind==='collection'?'Collection':'Delay';return `<div class="job"><div class="job-head"><strong>${esc(j?.job_number||'Job')} — ${kind}</strong><span class="chip">${esc(n.status==='sent'?'Sent':n.status==='approved'?'Approved / unsent':'Needs review')}</span></div><p class="muted">${esc(c.name||'Customer')} · ${esc(c.phone||'No phone')}</p><label>Message (copy or open WhatsApp to edit before sending)</label><textarea data-message="${n.id}" rows="4">${esc(n.message)}</textarea><div class="row review-actions"><button class="secondary" data-copy="${n.id}">Copy message</button><button data-whatsapp="${n.id}" ${phone?'':'disabled title="Add a valid WhatsApp number to the customer"'}>Open WhatsApp</button>${j?.invoice_path?`<button class="secondary" data-review-invoice="${j.id}">Open invoice PDF</button>`:'<span class="muted">No invoice attached</span>'}<button class="secondary" data-sent="${n.id}">Mark as Sent</button><button class="secondary" data-dismiss="${n.id}">Dismiss</button></div><p class="muted">${n.kind==='collection'?(j?.invoice_path?'Attach the invoice PDF manually in WhatsApp. ':'No invoice attached; you can upload one later. '):''}Opening WhatsApp does not send the message.</p></div>`}
 function render(){
@@ -39,6 +39,7 @@ function render(){
  renderJobList();
  renderPlanner();
  renderStagePlanner();
+ renderOvenCapacity();
  $('archive').innerHTML=jobs.filter(j=>j.status==='Collected').map(jobHTML).join('')||'<p class="muted">No collected jobs yet.</p>';
  $('reviews').innerHTML=pending.map(reviewHTML).join('')||'<p class="muted">No messages awaiting review.</p>';
  $('reviewHistory').innerHTML=notices.filter(n=>['sent','failed'].includes(n.status)).map(n=>`<div class="job"><strong>${esc(jobs.find(j=>j.id===n.job_id)?.job_number||'Job')}</strong> — ${esc(n.kind)} · ${n.status==='sent'?'Marked sent':'Dismissed'}<p class="muted">${esc(n.message)}</p></div>`).join('')||'<p class="muted">No reviewed messages yet.</p>';
@@ -86,6 +87,26 @@ $('scheduleForm').onsubmit=async e=>{e.preventDefault();const id=$('scheduleJobI
 $('scheduleUnscheduled').onchange=e=>{$('scheduleDate').disabled=e.target.checked};
 document.addEventListener('click',e=>{const b=e.target.closest('[data-schedule]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.schedule);if(!j)return;$('scheduleJobId').value=j.id;$('scheduleJobLabel').textContent=`${j.job_number} · Promised ${j.due_date}`;$('scheduleDate').value=j.planned_date||j.due_date;$('scheduleUnscheduled').checked=false;$('scheduleDate').disabled=false;$('scheduleModal').classList.remove('hide')});
 // Phase 3.2: date suggestions are based on weekdays, not public holidays or shop capacity.
+
+function renderOvenCapacity(){
+ const container=$('ovenCapacity');if(!container)return;
+ $('ovenCount').value=ovenSettings.oven_count;$('ovenLoadsPerDay').value=ovenSettings.loads_per_oven_per_day;
+ const cap=ovenSettings.oven_count*ovenSettings.loads_per_oven_per_day;
+ const start=weekStart(plannerWeekOffset);
+ const curing=stagePlans.filter(p=>p.stage==='Curing / QC' && jobs.some(j=>j.id===p.job_id && !['Collected','Ready for Collection'].includes(j.status)));
+ const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(d.getDate()+i);return localISO(d)});
+ const total=days.map(day=>{
+  const plans=curing.filter(p=>p.planned_date===day);
+  const loads=plans.reduce((sum,p)=>sum+(Number(jobs.find(j=>j.id===p.job_id)?.oven_loads)||1),0);
+  return {day,plans,loads};
+ });
+ $('ovenCapacitySummary').textContent=`${ovenSettings.oven_count} oven(s) × ${ovenSettings.loads_per_oven_per_day} load(s) per oven/day = ${cap} estimated loads/day. Estimates only; oven dimensions, batch duration and item fit are not calculated.`;
+ container.innerHTML=total.map(({day,plans,loads})=>{
+ const over=loads>cap;
+ return `<div class="oven-day ${over?'oven-over':''}"><div class="oven-top"><strong>${esc(day)}</strong><span>${loads} / ${cap} loads ${over?'⚠ OVER CAPACITY':''}</span></div><div class="oven-meter"><div style="width:${Math.min(100,loads/cap*100)}%;background:${over?'#f87171':'#4ade80'};height:100%"></div></div>${plans.map(p=>{const j=jobs.find(x=>x.id===p.job_id);return `<div class="oven-job"><span>${esc(j?.job_number)} · ${Number(j?.oven_loads)||1} load(s)</span><button type="button" class="secondary" data-oven-job="${esc(p.job_id)}">Edit loads</button></div>`}).join('')||'<small>No curing jobs planned</small>'}</div>`;
+ }).join('');
+}
+
 const stageNames=['Pretreatment','Powder Coating','Curing / QC'];
 const stageLabels={'Pretreatment':'Pretreatment','Powder Coating':'Powder Coating','Curing / QC':'Curing / QC'};
 function parseDate(iso){const [y,m,d]=iso.split('-').map(Number);return new Date(y,m-1,d,12)}
@@ -147,4 +168,15 @@ $('jobForm').onsubmit=async e=>{e.preventDefault();const b=$('saveJob');b.disabl
 document.addEventListener('change',async e=>{const t=e.target;if(t.dataset.status)await transition(t.dataset.status,t.value);if(t.dataset.file)await uploadInvoice(t.dataset.file,t.files?.[0])});async function migratePendingReviews(){const pending=notices.filter(n=>n.status==='pending_integration');if(!pending.length)return;for(const n of pending)check(await db.from('notifications').update({status:'draft'}).eq('id',n.id));await load()}
 async function saveReviewMessage(id){const field=[...document.querySelectorAll('[data-message]')].find(x=>x.dataset.message===id);const n=notices.find(x=>x.id===id);if(!field||!n)return null;const message=field.value.trim();if(!message){msg('Message cannot be empty');return null}if(message!==n.message){check(await db.from('notifications').update({message}).eq('id',id));n.message=message}return message}
 document.addEventListener('click',async e=>{const t=e.target.closest('button');if(!t)return;try{if(t.dataset.edit)openEdit(t.dataset.edit);if(t.dataset.invoice||t.dataset.reviewInvoice)await viewInvoice(t.dataset.invoice||t.dataset.reviewInvoice);if(t.dataset.copy){const message=await saveReviewMessage(t.dataset.copy);if(message){await navigator.clipboard.writeText(message);msg('Message copied')}}if(t.dataset.whatsapp){const id=t.dataset.whatsapp,message=await saveReviewMessage(id);if(!message)return;const n=notices.find(x=>x.id===id),j=jobs.find(x=>x.id===n.job_id),c=customers.find(x=>x.id===j?.customer_id),phone=whatsappPhone(c?.phone);if(!phone){msg('Customer needs a valid WhatsApp number');return}window.open(`https://wa.me/${phone}?text=${encodeURIComponent(message)}`,'_blank','noopener,noreferrer');msg('WhatsApp opened. Check recipient and send manually; attach PDF if needed.')}if(t.dataset.sent){const id=t.dataset.sent;if(!confirm('Have you actually sent this message in WhatsApp?'))return;if(!await saveReviewMessage(id))return;check(await db.from('notifications').update({status:'sent'}).eq('id',id));msg('Marked as sent (manual confirmation)');await load()}if(t.dataset.dismiss){check(await db.from('notifications').update({status:'failed'}).eq('id',t.dataset.dismiss));msg('Message dismissed');await load()}}catch(err){msg('Review action failed: '+err.message)}});
+
+$('ovenSettingsForm').onsubmit=async e=>{
+ e.preventDefault();
+ const oven_count=Number($('ovenCount').value),loads_per_oven_per_day=Number($('ovenLoadsPerDay').value);
+ if(!Number.isInteger(oven_count)||oven_count<1||oven_count>20||!Number.isInteger(loads_per_oven_per_day)||loads_per_oven_per_day<1||loads_per_oven_per_day>100){msg('Enter valid oven counts and daily load capacity.');return}
+ try{check(await db.from('oven_capacity_settings').update({oven_count,loads_per_oven_per_day}).eq('id',1));ovenSettings={oven_count,loads_per_oven_per_day};renderOvenCapacity();msg('Shared oven capacity saved.')}catch(err){msg('Capacity save failed: '+err.message)}
+};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-oven-job]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.ovenJob);if(!j)return;$('ovenJobId').value=j.id;$('ovenJobLabel').textContent=j.job_number;$('ovenJobLoads').value=j.oven_loads||1;$('ovenJobModal').classList.remove('hide')});
+$('ovenJobCancel').onclick=()=>$('ovenJobModal').classList.add('hide');
+$('ovenJobForm').onsubmit=async e=>{e.preventDefault();const id=$('ovenJobId').value,oven_loads=Number($('ovenJobLoads').value);if(!Number.isInteger(oven_loads)||oven_loads<1||oven_loads>1000){msg('Enter a whole number of oven loads.');return}try{check(await db.from('jobs').update({oven_loads}).eq('id',id));$('ovenJobModal').classList.add('hide');await load();msg('Estimated oven loads saved.')}catch(err){msg('Save failed: '+err.message)}};
+
 boot().catch(e=>msg(e.message));
