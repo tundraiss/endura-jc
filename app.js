@@ -73,9 +73,9 @@ async function setPlannedDate(id,date){
  if(j.planned_date===date)return;
  try{check(await db.from('jobs').update({planned_date:date,updated_at:new Date().toISOString()}).eq('id',id));j.planned_date=date;renderPlanner();msg(date?`Scheduled ${j.job_number} for ${date}`:`Moved ${j.job_number} to unscheduled`)}catch(e){msg('Scheduling failed: '+e.message)}
 }
-$('plannerPrev').onclick=()=>{plannerWeekOffset--;renderPlanner();renderStagePlanner()};
-$('plannerNext').onclick=()=>{plannerWeekOffset++;renderPlanner();renderStagePlanner()};
-$('plannerToday').onclick=()=>{plannerWeekOffset=0;renderPlanner();renderStagePlanner()};
+$('plannerPrev').onclick=()=>{plannerWeekOffset--;renderPlanner();renderStagePlanner();renderOvenCapacity()};
+$('plannerNext').onclick=()=>{plannerWeekOffset++;renderPlanner();renderStagePlanner();renderOvenCapacity()};
+$('plannerToday').onclick=()=>{plannerWeekOffset=0;renderPlanner();renderStagePlanner();renderOvenCapacity()};
 $('plannerUnscheduled').addEventListener('dragover',e=>{e.preventDefault();e.currentTarget.classList.add('plan-drag-over')});
 document.addEventListener('dragstart',e=>{const card=e.target.closest('[data-drag-job]');if(!card)return;e.dataTransfer.setData('text/plain',card.dataset.dragJob);e.dataTransfer.effectAllowed='move'});
 document.addEventListener('dragover',e=>{const zone=e.target.closest('[data-plan-date],#plannerUnscheduled');if(!zone)return;e.preventDefault();e.dataTransfer.dropEffect='move';zone.classList.add('plan-drag-over')});
@@ -88,10 +88,53 @@ $('scheduleUnscheduled').onchange=e=>{$('scheduleDate').disabled=e.target.checke
 document.addEventListener('click',e=>{const b=e.target.closest('[data-schedule]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.schedule);if(!j)return;$('scheduleJobId').value=j.id;$('scheduleJobLabel').textContent=`${j.job_number} · Promised ${j.due_date}`;$('scheduleDate').value=j.planned_date||j.due_date;$('scheduleUnscheduled').checked=false;$('scheduleDate').disabled=false;$('scheduleModal').classList.remove('hide')});
 // Phase 3.2: date suggestions are based on weekdays, not public holidays or shop capacity.
 
+function calculatedDailyCapacity(){
+ const ovens=Number(ovenSettings.oven_count)||1, cap=Number(ovenSettings.loads_per_oven_per_day)||1;
+ const mins=Number(ovenSettings.cycle_minutes)||60, hours=Number(ovenSettings.operating_hours)||8;
+ return ovens*Math.min(cap,Math.floor(hours*60/mins));
+}
+function findOvenSlot(jobId){
+ const j=jobs.find(x=>x.id===jobId);if(!j)return {error:'Job not found'};
+ const current=stagePlans.find(p=>p.job_id===jobId&&p.stage==='Curing / QC');
+ const coating=stagePlans.find(p=>p.job_id===jobId&&p.stage==='Powder Coating');
+ if(!current)return {error:'No curing stage exists for this job'};
+ const capacity=calculatedDailyCapacity(),needed=Number(j.oven_loads)||1;
+ if(capacity<1)return {error:'Configured oven capacity is zero. Increase hours or shorten cycle time.'};
+ if(needed>capacity)return {error:`This job requires ${needed} loads, but daily capacity is ${capacity}. Split the job into multiple days or revise the load estimate.`};
+ const today=localISO(new Date()), due=j.due_date;
+ const first=coating?.planned_date>today?coating.planned_date:today;
+ // The curing stage must follow the coating stage, not occur on the same date.
+ const earliest=parseDate(first);if(coating&&coating.planned_date>=today)earliest.setDate(earliest.getDate()+1);
+ const booked=stagePlans.filter(p=>p.stage==='Curing / QC'&&p.job_id!==jobId&&jobs.some(x=>x.id===p.job_id&&!['Collected','Ready for Collection'].includes(x.status)));
+ let late=null;
+ for(let offset=0;offset<90;offset++){
+  const day=new Date(earliest);day.setDate(day.getDate()+offset);
+  if([0,6].includes(day.getDay()))continue;
+  const iso=localISO(day);
+  const used=booked.filter(p=>p.planned_date===iso).reduce((sum,p)=>sum+(Number(jobs.find(x=>x.id===p.job_id)?.oven_loads)||1),0);
+  if(used+needed<=capacity){
+   if(iso<=due)return {date:iso,used,capacity,late:false};
+   if(!late)late={date:iso,used,capacity,late:true};
+  }
+ }
+ return late||{error:'No available slot found in the next 90 days'};
+}
+document.addEventListener('click',async e=>{
+ const b=e.target.closest('[data-suggest-oven]');if(!b)return;
+ const j=jobs.find(x=>x.id===b.dataset.suggestOven);if(!j)return;
+ const result=findOvenSlot(j.id);
+ if(result.error){msg(result.error);return}
+ const existing=stagePlans.find(p=>p.job_id===j.id&&p.stage==='Curing / QC');
+ const note=result.late?'WARNING: Suggested date is AFTER the customer due date.':'Suggested date is on or before the customer due date.';
+ if(!confirm(`${j.job_number}: Move curing/QC from ${existing.planned_date} to ${result.date}?\\n${note}\\nCapacity: ${result.used}+${Number(j.oven_loads)||1} of ${result.capacity} loads.\\nNo customer due date or job status will change.`))return;
+ await updateStage(existing.id,result.date);
+});
+
 function renderOvenCapacity(){
  const container=$('ovenCapacity');if(!container)return;
  $('ovenCount').value=ovenSettings.oven_count;$('ovenLoadsPerDay').value=ovenSettings.loads_per_oven_per_day;
- const cap=ovenSettings.oven_count*ovenSettings.loads_per_oven_per_day;
+ $('ovenCycleMinutes').value=ovenSettings.cycle_minutes??60;$('ovenDailyHours').value=ovenSettings.operating_hours??8;
+ const cap=calculatedDailyCapacity();
  const start=weekStart(plannerWeekOffset);
  const curing=stagePlans.filter(p=>p.stage==='Curing / QC' && jobs.some(j=>j.id===p.job_id && !['Collected','Ready for Collection'].includes(j.status)));
  const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(d.getDate()+i);return localISO(d)});
@@ -100,10 +143,10 @@ function renderOvenCapacity(){
   const loads=plans.reduce((sum,p)=>sum+(Number(jobs.find(j=>j.id===p.job_id)?.oven_loads)||1),0);
   return {day,plans,loads};
  });
- $('ovenCapacitySummary').textContent=`${ovenSettings.oven_count} oven(s) × ${ovenSettings.loads_per_oven_per_day} load(s) per oven/day = ${cap} estimated loads/day. Estimates only; oven dimensions, batch duration and item fit are not calculated.`;
+ $('ovenCapacitySummary').textContent=`${ovenSettings.oven_count} oven(s) × ${Math.min(Number(ovenSettings.loads_per_oven_per_day),Math.floor(Number(ovenSettings.operating_hours)*60/Number(ovenSettings.cycle_minutes)))} loads per oven/day = ${cap} estimated loads/day. Limited by both your load cap and available hours. Assumes identical ovens and one full batch per cycle; does not calculate physical fit.`;
  container.innerHTML=total.map(({day,plans,loads})=>{
  const over=loads>cap;
- return `<div class="oven-day ${over?'oven-over':''}"><div class="oven-top"><strong>${esc(day)}</strong><span>${loads} / ${cap} loads ${over?'⚠ OVER CAPACITY':''}</span></div><div class="oven-meter"><div style="width:${Math.min(100,loads/cap*100)}%;background:${over?'#f87171':'#4ade80'};height:100%"></div></div>${plans.map(p=>{const j=jobs.find(x=>x.id===p.job_id);return `<div class="oven-job"><span>${esc(j?.job_number)} · ${Number(j?.oven_loads)||1} load(s)</span><button type="button" class="secondary" data-oven-job="${esc(p.job_id)}">Edit loads</button></div>`}).join('')||'<small>No curing jobs planned</small>'}</div>`;
+ return `<div class="oven-day ${over?'oven-over':''}"><div class="oven-top"><strong>${esc(day)}</strong><span>${loads} / ${cap} loads ${over?'⚠ OVER CAPACITY':''}</span></div><div class="oven-meter"><div style="width:${Math.min(100,loads/cap*100)}%;background:${over?'#f87171':'#4ade80'};height:100%"></div></div>${plans.map(p=>{const j=jobs.find(x=>x.id===p.job_id);return `<div class="oven-job"><span>${esc(j?.job_number)} · ${Number(j?.oven_loads)||1} load(s)</span><button type="button" class="secondary" data-oven-job="${esc(p.job_id)}">Edit loads</button><button type="button" class="secondary" data-suggest-oven="${esc(p.job_id)}">Find slot</button></div>`}).join('')||'<small>No curing jobs planned</small>'}</div>`;
  }).join('');
 }
 
@@ -171,9 +214,9 @@ document.addEventListener('click',async e=>{const t=e.target.closest('button');i
 
 $('ovenSettingsForm').onsubmit=async e=>{
  e.preventDefault();
- const oven_count=Number($('ovenCount').value),loads_per_oven_per_day=Number($('ovenLoadsPerDay').value);
- if(!Number.isInteger(oven_count)||oven_count<1||oven_count>20||!Number.isInteger(loads_per_oven_per_day)||loads_per_oven_per_day<1||loads_per_oven_per_day>100){msg('Enter valid oven counts and daily load capacity.');return}
- try{check(await db.from('oven_capacity_settings').update({oven_count,loads_per_oven_per_day}).eq('id',1));ovenSettings={oven_count,loads_per_oven_per_day};renderOvenCapacity();msg('Shared oven capacity saved.')}catch(err){msg('Capacity save failed: '+err.message)}
+ const oven_count=Number($('ovenCount').value),loads_per_oven_per_day=Number($('ovenLoadsPerDay').value),cycle_minutes=Number($('ovenCycleMinutes').value),operating_hours=Number($('ovenDailyHours').value);
+ if(!Number.isInteger(oven_count)||oven_count<1||oven_count>20||!Number.isInteger(loads_per_oven_per_day)||loads_per_oven_per_day<1||loads_per_oven_per_day>100||!Number.isInteger(cycle_minutes)||cycle_minutes<1||cycle_minutes>1440||!(operating_hours>0&&operating_hours<=24)){msg('Enter valid oven counts, cycle minutes and operating hours.');return}
+ try{const updated=check(await db.from('oven_capacity_settings').update({oven_count,loads_per_oven_per_day,cycle_minutes,operating_hours}).eq('id',1).select().single());ovenSettings=updated;renderOvenCapacity();msg('Shared oven capacity saved.')}catch(err){msg('Capacity save failed: '+err.message)}
 };
 document.addEventListener('click',e=>{const b=e.target.closest('[data-oven-job]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.ovenJob);if(!j)return;$('ovenJobId').value=j.id;$('ovenJobLabel').textContent=j.job_number;$('ovenJobLoads').value=j.oven_loads||1;$('ovenJobModal').classList.remove('hide')});
 $('ovenJobCancel').onclick=()=>$('ovenJobModal').classList.add('hide');
