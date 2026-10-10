@@ -202,7 +202,7 @@ async function uploadInvoice(id,file){if(!file)return;if(file.type!=='applicatio
 async function viewInvoice(id){const j=jobs.find(x=>x.id===id);if(!j?.invoice_path)return;try{const r=check(await db.storage.from('invoices').createSignedUrl(j.invoice_path,60));window.open(r.signedUrl,'_blank','noopener,noreferrer')}catch(e){msg(e.message)}}
 async function makeDelayReviews(){for(const j of jobs){if(urgency(j)[0]!=='overdue'||['Collected','Ready for Collection'].includes(j.status)||notices.some(n=>n.job_id===j.id&&n.kind==='delay'))continue;const c=customers.find(x=>x.id===j.customer_id);const message=`Good day ${c?.name||''}, we apologise that your EnduraCoat job ${j.job_number} has been delayed. We will confirm an updated collection date shortly.`;check(await db.from('notifications').insert({job_id:j.id,kind:'delay',status:'draft',message}));}await load()}
 async function boot(){if(!configured){$('setup').classList.remove('hide');return}db=createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);const {data:{session}}=await db.auth.getSession();await authView(session);db.auth.onAuthStateChange((_event,session)=>{setTimeout(()=>authView(session),0)})}
-async function authView(session){$('login').classList.toggle('hide',!!session);$('app').classList.toggle('hide',!session);$('logout').classList.toggle('hide',!session);if(session){try{const staff=check(await db.from('staff').select('user_id').eq('user_id',session.user.id).maybeSingle());if(!staff){$('app').classList.add('hide');msg('Account not authorised. Add this user UUID to public.staff in Supabase.');return}await load();await makeDelayReviews();await migratePendingReviews()}catch(e){msg('Database error: '+e.message)}}}
+async function authView(session){if(!session)$('pushSettings').classList.add('hide');$('login').classList.toggle('hide',!!session);$('app').classList.toggle('hide',!session);$('logout').classList.toggle('hide',!session);if(session){try{const staff=check(await db.from('staff').select('user_id').eq('user_id',session.user.id).maybeSingle());if(!staff){$('app').classList.add('hide');msg('Account not authorised. Add this user UUID to public.staff in Supabase.');return}await load();await makeDelayReviews();await migratePendingReviews();$('pushSettings').classList.remove('hide');refreshPushStatus()}catch(e){msg('Database error: '+e.message)}}}
 $('loginForm').onsubmit=async e=>{e.preventDefault();const r=await db.auth.signInWithPassword({email:$('email').value,password:$('password').value});if(r.error)msg(r.error.message)};
 $('logout').onclick=()=>db.auth.signOut();document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>show(b.dataset.tab));$('refresh').onclick=()=>load().catch(e=>msg(e.message));$('addItem').onclick=itemRow;itemRow();
 $('jobForm').onsubmit=async e=>{e.preventDefault();const b=$('saveJob');b.disabled=true;try{const enteredNumber=$('jobno').value.trim();if(jobs.some(j=>j.job_number.toLowerCase()===enteredNumber.toLowerCase())){const input=$('jobno');input.focus();throw Error(`Job number ${enteredNumber} already exists. Please enter a different job number.`)}let c=customers.find(c=>c.name.toLowerCase()===$('customer').value.trim().toLowerCase()&&c.phone===$('phone').value.trim());if(!c)c=check(await db.from('customers').insert({name:$('customer').value.trim(),phone:$('phone').value.trim()}).select().single());const job=check(await db.from('jobs').insert({job_number:$('jobno').value.trim(),customer_id:c.id,due_date:$('due').value,notes:$('notes').value}).select().single());const rows=[...document.querySelectorAll('#items .item')].map(x=>({job_id:job.id,description:x.querySelector('.desc').value,quantity:Number(x.querySelector('.qty').value),colour:x.querySelector('.colour').value,dimensions:x.querySelector('.dimensions').value,price:Number(x.querySelector('.price').value)||0}));check(await db.from('job_items').insert(rows));check(await db.from('job_history').insert({job_id:job.id,status:'New'}));
@@ -221,5 +221,36 @@ $('ovenSettingsForm').onsubmit=async e=>{
 document.addEventListener('click',e=>{const b=e.target.closest('[data-oven-job]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.ovenJob);if(!j)return;$('ovenJobId').value=j.id;$('ovenJobLabel').textContent=j.job_number;$('ovenJobLoads').value=j.oven_loads||1;$('ovenJobModal').classList.remove('hide')});
 $('ovenJobCancel').onclick=()=>$('ovenJobModal').classList.add('hide');
 $('ovenJobForm').onsubmit=async e=>{e.preventDefault();const id=$('ovenJobId').value,oven_loads=Number($('ovenJobLoads').value);if(!Number.isInteger(oven_loads)||oven_loads<1||oven_loads>1000){msg('Enter a whole number of oven loads.');return}try{check(await db.from('jobs').update({oven_loads}).eq('id',id));$('ovenJobModal').classList.add('hide');await load();msg('Estimated oven loads saved.')}catch(err){msg('Save failed: '+err.message)}};
+
+
+const PUSH_FN='push-dispatch';
+function decodeVapid(s){const b64=s.replace(/-/g,'+').replace(/_/g,'/');const raw=atob(b64+'='.repeat((4-b64.length%4)%4));return Uint8Array.from(raw,c=>c.charCodeAt(0))}
+async function pushCall(payload){
+ const {data:{session}}=await db.auth.getSession();if(!session)throw Error('Sign in first.');
+ const r=await fetch(`${SUPABASE_URL}/functions/v1/${PUSH_FN}`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${session.access_token}`,'apikey':SUPABASE_PUBLISHABLE_KEY},body:JSON.stringify(payload)});
+ const body=await r.json().catch(()=>({}));if(!r.ok)throw Error(body.error||`Push service returned ${r.status}`);return body;
+}
+async function refreshPushStatus(){
+ const label=$('pushStatus');if(!label)return;
+ if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)){label.textContent='Web Push is unavailable in this browser. On iPhone, add ENDURA JC to Home Screen and open it there.';return}
+ try{const reg=await navigator.serviceWorker.getRegistration('./');const sub=reg?await reg.pushManager.getSubscription():null;label.textContent=sub?'Push enabled on this device.':'Push is not enabled on this device.'}catch(e){label.textContent=e.message}
+}
+$('pushEnable').onclick=async()=>{
+ try{
+ if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window))throw Error('This browser does not support Web Push. On iPhone install ENDURA JC to your Home Screen.');
+ const permission=await Notification.requestPermission();if(permission!=='granted')throw Error('Notification permission was not granted. Check your device settings.');
+ const {publicKey}=await pushCall({action:'public-key'});if(!publicKey)throw Error('VAPID key not configured on Supabase.');
+ const reg=await navigator.serviceWorker.register('./push-sw.js',{scope:'./'});
+ await navigator.serviceWorker.ready;
+ let sub=await reg.pushManager.getSubscription();
+ if(sub){const key=new Uint8Array(sub.options.applicationServerKey||[]);if(key.length&&!key.every((b,i)=>b===decodeVapid(publicKey)[i])){await sub.unsubscribe();sub=null}}
+ if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeVapid(publicKey)});
+ await pushCall({action:'subscribe',subscription:sub.toJSON()});msg('Push notifications enabled.');await refreshPushStatus();
+ }catch(e){msg('Push setup: '+e.message);await refreshPushStatus()}
+};
+$('pushDisable').onclick=async()=>{
+ try{const reg=await navigator.serviceWorker.getRegistration('./');const sub=reg?await reg.pushManager.getSubscription():null;if(sub){await pushCall({action:'unsubscribe',endpoint:sub.endpoint});await sub.unsubscribe()}msg('Push disabled on this device.');await refreshPushStatus()}catch(e){msg('Disable failed: '+e.message)}
+};
+$('pushTest').onclick=async()=>{try{const r=await pushCall({action:'test'});msg(`Test queued for ${r.queued||0} subscription(s). It will be delivered by the dispatcher.`)}catch(e){msg('Test failed: '+e.message)}};
 
 boot().catch(e=>msg(e.message));
