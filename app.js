@@ -305,7 +305,9 @@ if(!window.PointerEvent){
  window.addEventListener('mouseup',e=>stopSignature(e,'mouse'));
 }
 let printReturnTab = 'dashboard';
+let currentPrintJobId = null;
 function printJobCard(id){
+ currentPrintJobId=id;
  const j=jobs.find(x=>x.id===id);if(!j){msg('Job not found. Refresh and try again.');return}
  const c=customers.find(x=>x.id===j.customer_id)||{};
  const lines=items.filter(x=>x.job_id===id);
@@ -321,7 +323,71 @@ function printJobCard(id){
 }
 function closeJobPrint(){show(printReturnTab);window.scrollTo(0,0)}
 $('closeJobPrint').onclick=closeJobPrint;
-$('printJobNow').onclick=()=>{document.body.classList.add('job-print-preview-open');try{window.print()}finally{setTimeout(()=>document.body.classList.remove('job-print-preview-open'),800)}};
+// iOS Home Screen PWAs may ignore window.print(). Share an actual PDF instead.
+async function createJobCardPDF(id){
+ const j=jobs.find(x=>x.id===id);if(!j)throw Error('Job card not found.');
+ if(!window.jspdf?.jsPDF)throw Error('PDF generator is unavailable. Check your internet connection and reopen ENDURA JC.');
+ const {jsPDF}=window.jspdf;
+ const pdf=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});
+ const c=customers.find(x=>x.id===j.customer_id)||{};
+ const lines=items.filter(x=>x.job_id===id);
+ const sig=signatures.find(x=>x.job_id===id);
+ const margin=15, width=180, bottom=280;
+ let y=19;
+ function page(needed=8){if(y+needed>bottom){pdf.addPage();y=18;}}
+ function line(value,{bold=false,size=10,gap=6}={}){
+  pdf.setFont('helvetica',bold?'bold':'normal');pdf.setFontSize(size);
+  const parts=pdf.splitTextToSize(String(value??''),width);
+  page(parts.length*(size*.42)+gap);
+  pdf.text(parts,margin,y);y+=parts.length*(size*.42)+gap;
+ }
+ function rule(){page(5);pdf.setDrawColor(190);pdf.line(margin,y,195,y);y+=6;}
+ line('ENDURACOAT',{bold:true,size:20,gap:8});
+ line('POWDER COATING - JOB CARD',{bold:true,size:12,gap:7});rule();
+ line('Job number: '+(j.job_number||''),{bold:true,size:13});
+ line('Created: '+new Date(j.created_at).toLocaleDateString('en-ZA'));
+ line('Customer: '+(c.name||''));line('Contact: '+(c.phone||''));
+ line('Promised completion: '+(j.due_date||''));line('Status: '+(j.status||''));rule();
+ line('ITEMS RECEIVED FOR POWDER COATING',{bold:true,size:11});
+ for(let i=0;i<lines.length;i++){
+  const it=lines[i];page(23);
+  line(`${i+1}. ${it.description||'Item'} | Qty: ${it.quantity||0}`,{bold:true,gap:4});
+  line(`Colour: ${it.colour||'-'} | Dimensions: ${it.dimensions||'-'} | Price: R ${Number(it.price||0).toFixed(2)}`,{size:9,gap:6});
+ }
+ rule();line('Total recorded: R '+lines.reduce((sum,i)=>sum+Number(i.price||0),0).toFixed(2),{bold:true});
+ line('JOB NOTES',{bold:true,size:11});line(j.notes||'-');rule();
+ line('CUSTOMER ACKNOWLEDGEMENT',{bold:true,size:11});
+ line('The customer acknowledges the items listed and authorises recording of their signature where provided.',{size:9});
+ if(sig?.signature_data){
+  page(40);
+  try{pdf.addImage(sig.signature_data,'PNG',margin,y,65,22);y+=27;}
+  catch(e){line('Signature image could not be included.',{size:9});}
+  line('Signed by: '+(sig.signer_name||''),{bold:true});
+  line('Signed at: '+new Date(sig.signed_at).toLocaleString('en-ZA'));
+ }else{line('Customer signature: ____________________________');}
+ page(15);rule();line('EnduraCoat | Generated electronically from ENDURA JC',{size:8});
+ return pdf.output('blob');
+}
+$('printJobNow').onclick=async()=>{
+ const button=$('printJobNow');button.disabled=true;
+ try{
+  if(!currentPrintJobId)throw Error('Choose a job card first.');
+  const j=jobs.find(x=>x.id===currentPrintJobId);
+  const blob=await createJobCardPDF(currentPrintJobId);
+  const safeName=String(j.job_number||'Job_Card').replace(/[^a-zA-Z0-9_-]/g,'_');
+  const file=new File([blob],`EnduraCoat_${safeName}.pdf`,{type:'application/pdf'});
+  if(navigator.share&&navigator.canShare?.({files:[file]})){
+   try{await navigator.share({files:[file],title:`EnduraCoat ${j.job_number}`});return;}
+   catch(e){if(e.name==='AbortError')return;}
+  }
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a');link.href=url;link.download=file.name;
+  document.body.appendChild(link);link.click();link.remove();
+  msg('PDF created. Open it in Files or Downloads, then tap Share > Print to select a printer.');
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+ }catch(e){msg('Could not prepare printable PDF: '+e.message)}
+ finally{button.disabled=false}
+};
 
 // Job creation cancellation: discard unsaved form only after confirmation.
 $('cancelNewJob').onclick=()=>{
