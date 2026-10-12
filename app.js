@@ -231,9 +231,18 @@ async function pushCall(payload){
  const body=await r.json().catch(()=>({}));if(!r.ok)throw Error(body.error||`Push service returned ${r.status}`);return body;
 }
 async function refreshPushStatus(){
- const label=$('pushStatus');if(!label)return;
- if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)){label.textContent='Web Push is unavailable in this browser. On iPhone, add ENDURA JC to Home Screen and open it there.';return}
- try{const reg=await navigator.serviceWorker.getRegistration('./');const sub=reg?await reg.pushManager.getSubscription():null;label.textContent=sub?'Push enabled on this device.':'Push is not enabled on this device.'}catch(e){label.textContent=e.message}
+ const label=$('pushStatus'),panel=$('pushSettings');if(!label||!panel)return;
+ if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)){
+  label.textContent='Web Push is unavailable in this browser. On iPhone, add ENDURA JC to Home Screen and open it there.';
+  panel.classList.remove('hide');return;
+ }
+ try{
+  const reg=await navigator.serviceWorker.getRegistration('./');
+  const sub=reg?await reg.pushManager.getSubscription():null;
+  const enabled=Boolean(sub)&&Notification.permission==='granted';
+  label.textContent=enabled?'Push enabled on this device.':'Push is not enabled on this device.';
+  panel.classList.toggle('hide',enabled);
+ }catch(e){label.textContent=e.message;panel.classList.remove('hide')}
 }
 $('pushEnable').onclick=async()=>{
  try{
