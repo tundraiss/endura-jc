@@ -11,7 +11,7 @@ const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const msg=x=>{const t=$('toast');t.textContent=x;t.style.display='block';setTimeout(()=>t.style.display='none',5500)};
 const check=(res)=>{if(res.error)throw res.error;return res.data};
 function urgency(j){if(['Collected','Ready for Collection'].includes(j.status))return ['ok',j.status];const days=Math.ceil((new Date(j.due_date+'T23:59:59')-new Date())/86400000);return days<0?['overdue',`${Math.abs(days)} day(s) overdue`]:days<=2?['urgent',days===0?'Due today':`Due in ${days} day(s)`]:['ok',`Due in ${days} day(s)`]}
-function show(tab){for(const el of ['dashboard','new','planner','review','collected'])$(el).classList.toggle('hide',el!==tab);document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab))}
+function show(tab){for(const el of ['dashboard','new','planner','review','collected','jobPrintModal'])$(el).classList.toggle('hide',el!==tab);$('app').classList.toggle('hide',tab==='jobPrintModal');document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));if(tab!=='jobPrintModal')document.body.classList.remove('job-print-preview-open')}
 function itemRow(){const d=document.createElement('div');d.className='item';d.innerHTML=`<div class="row"><div><label>Item</label><input class="desc" required placeholder="Steel brackets"></div><div><label>Quantity</label><input class="qty" type="number" min="1" value="1" required></div><div><label>Colour</label><input class="colour" placeholder="Matt black"></div><div><label>Dimensions</label><input class="dimensions" placeholder="L x W x H"></div><div><label>Price (R)</label><input class="price" type="number" min="0" step="0.01" value="0"></div><button type="button" class="secondary remove">Remove</button></div>`;d.querySelector('.remove').onclick=()=>{if($('items').children.length>1)d.remove()};$('items').appendChild(d)}
 async function load(){jobs=check(await db.from('jobs').select('*').order('created_at',{ascending:false}));customers=check(await db.from('customers').select('*'));items=check(await db.from('job_items').select('*'));notices=check(await db.from('notifications').select('*'));stagePlans=check(await db.from('job_stage_schedule').select('*'));signatures=check(await db.from('job_signatures').select('*'));jobPhotos=check(await db.from('job_photos').select('*').order('created_at',{ascending:true}));const settings=check(await db.from('oven_capacity_settings').select('*').eq('id',1).single());ovenSettings=settings;render();refreshPrintJobOptions()}
 function whatsappPhone(raw){let p=String(raw||'').replace(/\D/g,'');if(p.startsWith('00'))p=p.slice(2);if(p.startsWith('0'))p='27'+p.slice(1);if(p.length===9)p='27'+p;return /^\d{10,15}$/.test(p)?p:null}
@@ -304,6 +304,7 @@ if(!window.PointerEvent){
  signatureCanvas.addEventListener('mousemove',e=>moveSignature(e,'mouse'));
  window.addEventListener('mouseup',e=>stopSignature(e,'mouse'));
 }
+let printReturnTab = 'dashboard';
 function printJobCard(id){
  const j=jobs.find(x=>x.id===id);if(!j){msg('Job not found. Refresh and try again.');return}
  const c=customers.find(x=>x.id===j.customer_id)||{};
@@ -314,13 +315,14 @@ function printJobCard(id){
  const sigHtml=sig?`<img class="print-signature" src="${sig.signature_data}" alt="Customer signature"><p><strong>${esc(sig.signer_name)}</strong> — ${esc(new Date(sig.signed_at).toLocaleString('en-ZA'))}</p>`:'<div class="print-unsigned">Customer signature: __________________________________</div>';
  $('jobPrintSheet').innerHTML=`<header class="print-header"><div><h1>ENDURACOAT</h1><div>POWDER COATING — JOB CARD</div></div><div><strong>${esc(j.job_number)}</strong><p>Created: ${esc(new Date(j.created_at).toLocaleDateString('en-ZA'))}</p></div></header><div class="print-meta"><div><strong>Customer:</strong> ${esc(c.name)}</div><div><strong>Contact:</strong> ${esc(c.phone)}</div><div><strong>Promised completion:</strong> ${esc(j.due_date)}</div><div><strong>Status:</strong> ${esc(j.status)}</div></div><h2>Items received for powder coating</h2><table class="print-table"><thead><tr><th>#</th><th>Item description</th><th>Qty</th><th>Colour</th><th>Dimensions</th><th>Price</th></tr></thead><tbody>${rows}</tbody></table><p style="text-align:right"><strong>Total recorded: R ${sum.toFixed(2)}</strong></p><h2>Job notes</h2><div class="print-notes">${esc(j.notes||'—')}</div><h2>Customer acknowledgement</h2><p>The customer acknowledges the items listed above and authorises recording of the signature, where provided.</p>${sigHtml}<footer class="print-footer">EnduraCoat | Job card generated electronically from ENDURA JC</footer>`;
  $('jobPrintTitle').textContent='Job Card '+j.job_number;
- $('jobPrintModal').classList.remove('hide');
- document.body.classList.add('job-print-preview-open');
+ printReturnTab=['dashboard','new','planner','review','collected'].find(tab=>!$(tab).classList.contains('hide'))||'dashboard';
+ show('jobPrintModal');
+ window.scrollTo(0,0);
 }
-function closeJobPrint(){ $('jobPrintModal').classList.add('hide');document.body.classList.remove('job-print-preview-open') }
+function closeJobPrint(){show(printReturnTab);window.scrollTo(0,0)}
 $('closeJobPrint').onclick=closeJobPrint;
-$('printJobNow').onclick=()=>{window.print()};
-$('jobPrintModal').addEventListener('click',e=>{if(e.target.id==='jobPrintModal')closeJobPrint()});
+$('printJobNow').onclick=()=>{document.body.classList.add('job-print-preview-open');try{window.print()}finally{setTimeout(()=>document.body.classList.remove('job-print-preview-open'),800)}};
+
 // Job creation cancellation: discard unsaved form only after confirmation.
 $('cancelNewJob').onclick=()=>{
  if(!confirm('Cancel creating this job card? All unsaved details and the signature will be discarded.'))return;
