@@ -394,6 +394,16 @@ $('printJobNow').onclick=async()=>{
  const button=$('printJobNow');button.disabled=true;
  try{
   if(!currentPrintJobId)throw Error('Choose a job card first.');
+  // Desktop browsers use the native print dialog and print the exact HTML preview.
+  // iOS installed PWAs retain the existing shareable-PDF workflow.
+  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||
+    (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  if(!isIOS){
+   document.body.classList.add('job-print-preview-open');
+   try{window.print();}
+   finally{setTimeout(()=>document.body.classList.remove('job-print-preview-open'),1200);}
+   return;
+  }
   const j=jobs.find(x=>x.id===currentPrintJobId);
   const blob=await createJobCardPDF(currentPrintJobId);
   const safeName=String(j.job_number||'Job_Card').replace(/[^a-zA-Z0-9_-]/g,'_');
