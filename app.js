@@ -6,18 +6,20 @@ let db=null, jobs=[], customers=[], items=[], notices=[], stagePlans=[], ovenSet
 let editRemoved=new Set();
 let signatures=[];let signatureDirty=false;let jobPhotos=[];
 let plannerWeekOffset=0;
-const statuses=['New','Pretreatment','Powder Coating','Curing / QC','Ready for Collection','Collected'];
+const statuses=['New','To Be Quoted','Pretreatment','Powder Coating','Curing / QC','Ready for Collection','Collected'];
+const isQuote=j=>['New','To Be Quoted'].includes(j.status);
+const isProduction=j=>['Pretreatment','Powder Coating','Curing / QC'].includes(j.status);
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const msg=x=>{const t=$('toast');t.textContent=x;t.style.display='block';setTimeout(()=>t.style.display='none',5500)};
 const check=(res)=>{if(res.error)throw res.error;return res.data};
 function urgency(j){if(['Collected','Ready for Collection'].includes(j.status))return ['ok',j.status];const days=Math.ceil((new Date(j.due_date+'T23:59:59')-new Date())/86400000);return days<0?['overdue',`${Math.abs(days)} day(s) overdue`]:days<=2?['urgent',days===0?'Due today':`Due in ${days} day(s)`]:['ok',`Due in ${days} day(s)`]}
-function show(tab){for(const el of ['dashboard','new','planner','review','collected','jobPrintModal'])$(el).classList.toggle('hide',el!==tab);$('app').classList.toggle('hide',tab==='jobPrintModal');document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));if(tab!=='jobPrintModal')document.body.classList.remove('job-print-preview-open')}
+function show(tab){for(const el of ['dashboard','quote','active','ready','new','planner','review','collected','jobPrintModal'])$(el).classList.toggle('hide',el!==tab);$('app').classList.toggle('hide',tab==='jobPrintModal');document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));if(tab!=='jobPrintModal')document.body.classList.remove('job-print-preview-open')}
 function itemRow(){const d=document.createElement('div');d.className='item';d.innerHTML=`<div class="row"><div><label>Item</label><input class="desc" required placeholder="Steel brackets"></div><div><label>Quantity</label><input class="qty" type="number" min="1" value="1" required></div><div><label>Colour</label><input class="colour" placeholder="Matt black"></div><div><label>Dimensions</label><input class="dimensions" placeholder="L x W x H"></div><div><label>Price (R)</label><input class="price" type="number" min="0" step="0.01" value="0"></div><button type="button" class="secondary remove">Remove</button></div>`;d.querySelector('.remove').onclick=()=>{if($('items').children.length>1)d.remove()};$('items').appendChild(d)}
 async function load(){jobs=check(await db.from('jobs').select('*').is('deleted_at',null).order('created_at',{ascending:false}));customers=check(await db.from('customers').select('*'));items=check(await db.from('job_items').select('*'));notices=check(await db.from('notifications').select('*'));stagePlans=check(await db.from('job_stage_schedule').select('*'));signatures=check(await db.from('job_signatures').select('*'));jobPhotos=check(await db.from('job_photos').select('*').order('created_at',{ascending:true}));const settings=check(await db.from('oven_capacity_settings').select('*').eq('id',1).single());ovenSettings=settings;render();refreshPrintJobOptions()}
 function whatsappPhone(raw){let p=String(raw||'').replace(/\D/g,'');if(p.startsWith('00'))p=p.slice(2);if(p.startsWith('0'))p='27'+p.slice(1);if(p.length===9)p='27'+p;return /^\d{10,15}$/.test(p)?p:null}
 function reviewHTML(n){const j=jobs.find(x=>x.id===n.job_id),c=customers.find(x=>x.id===j?.customer_id)||{},phone=whatsappPhone(c.phone);const kind=n.kind==='collection'?'Collection':'Delay';return `<div class="job"><div class="job-head"><strong>${esc(j?.job_number||'Job')} — ${kind}</strong><span class="chip">${esc(n.status==='sent'?'Sent':n.status==='approved'?'Approved / unsent':'Needs review')}</span></div><p class="muted">${esc(c.name||'Customer')} · ${esc(c.phone||'No phone')}</p><label>Message (copy or open WhatsApp to edit before sending)</label><textarea data-message="${n.id}" rows="4">${esc(n.message)}</textarea><div class="row review-actions"><button class="secondary" data-copy="${n.id}">Copy message</button><button data-whatsapp="${n.id}" ${phone?'':'disabled title="Add a valid WhatsApp number to the customer"'}>Open WhatsApp</button>${j?.invoice_path?`<button class="secondary" data-review-invoice="${j.id}">Open invoice PDF</button>`:'<span class="muted">No invoice attached</span>'}<button class="secondary" data-sent="${n.id}">Mark as Sent</button><button class="secondary" data-dismiss="${n.id}">Dismiss</button></div><p class="muted">${n.kind==='collection'?(j?.invoice_path?'Attach the invoice PDF manually in WhatsApp. ':'No invoice attached; you can upload one later. '):''}Opening WhatsApp does not send the message.</p></div>`}
 function render(){
- const active=jobs.filter(j=>j.status!=='Collected');
+ const active=jobs.filter(j=>isProduction(j));
  const late=active.filter(j=>urgency(j)[0]==='overdue');
  const urgent=active.filter(j=>urgency(j)[0]==='urgent');
  const pending=notices.filter(n=>['draft','approved','pending_integration'].includes(n.status));
@@ -32,12 +34,14 @@ function render(){
  const metrics=[['Active jobs',active.length,'◫',''],['Due soon',urgent.length,'◷',''],['Overdue',late.length,'!','metric-danger'],['Ready to collect',active.filter(j=>j.status==='Ready for Collection').length,'✓','metric-ready'],['Review messages',pending.length,'✉','metric-review']];
  $('stats').innerHTML=metrics.map(([name,count,icon,cls])=>`<div class="metric ${cls}"><span class="metric-icon" aria-hidden="true">${icon}</span><div class="metric-value">${count}</div><div class="metric-label">${name}</div></div>`).join('');
  $('dashboardDate').textContent=new Intl.DateTimeFormat('en-ZA',{weekday:'long',day:'numeric',month:'long',year:'numeric'}).format(new Date());
- const stages=[['New','#94a3b8'],['Pretreatment','#60a5fa'],['Powder Coating','#f59e0b'],['Curing / QC','#a78bfa'],['Ready for Collection','#4ade80']];
- const max=Math.max(1,...stages.map(([s])=>active.filter(j=>j.status===s).length));
- $('pipeline').innerHTML=stages.map(([s,color])=>{const count=active.filter(j=>j.status===s).length;return `<div class="pipeline-row"><span class="pipeline-name">${esc(s)}</span><div class="pipeline-track"><div class="pipeline-fill" style="width:${100*count/max}%;background:${color}"></div></div><span class="pipeline-count">${count}</span></div>`}).join('');
+ const stages=[['To Be Quoted','#94a3b8'],['Pretreatment','#60a5fa'],['Powder Coating','#f59e0b'],['Curing / QC','#a78bfa'],['Ready for Collection','#4ade80']];
+ const max=Math.max(1,...stages.map(([s])=>(s==='To Be Quoted'?jobs.filter(isQuote):active.filter(j=>j.status===s)).length));
+ $('pipeline').innerHTML=stages.map(([s,color])=>{const count=(s==='To Be Quoted'?jobs.filter(isQuote):active.filter(j=>j.status===s)).length;return `<div class="pipeline-row"><span class="pipeline-name">${esc(s)}</span><div class="pipeline-track"><div class="pipeline-fill" style="width:${100*count/max}%;background:${color}"></div></div><span class="pipeline-count">${count}</span></div>`}).join('');
  const needs=[...late,...urgent].sort((a,b)=>a.due_date.localeCompare(b.due_date)).slice(0,5);
  $('attention').innerHTML=needs.map(j=>`<div class="attention-row"><div class="attention-title">${esc(j.job_number)} · ${esc(customers.find(c=>c.id===j.customer_id)?.name||'Customer')}</div><div class="attention-sub">${esc(urgency(j)[1])} · ${esc(j.status)}</div></div>`).join('')||'<div class="empty">No urgent jobs right now.</div>';
  renderJobList();
+ $('quoteJobs').innerHTML=jobs.filter(isQuote).map(jobHTML).join('')||'<p class="muted">No jobs awaiting quotation.</p>';
+ $('readyJobs').innerHTML=jobs.filter(j=>j.status==='Ready for Collection').map(jobHTML).join('')||'<p class="muted">No jobs ready for collection.</p>';
  renderPlanner();
  renderStagePlanner();
  renderOvenCapacity();
@@ -49,46 +53,25 @@ function localISO(date){const y=date.getFullYear(),m=String(date.getMonth()+1).p
 function weekStart(offset){const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()-((d.getDay()+6)%7)+offset*7);return d}
 function planCard(j){
  const c=customers.find(c=>c.id===j.customer_id);
- const overdue=j.due_date<localISO(new Date())&&!['Ready for Collection','Collected'].includes(j.status);
- return `<article class="planner-job ${overdue?'planner-late':j.status==='Ready for Collection'?'planner-ready':''}" draggable="true" data-drag-job="${esc(j.id)}" tabindex="0" aria-label="${esc(j.job_number)}. Drag to a production day or use Schedule"><strong>${esc(j.job_number)}</strong><span>${esc(c?.name||'Customer')} · ${esc(j.status)}</span><span>Promised: ${esc(j.due_date)}${overdue?' · OVERDUE':''}</span><div class="plan-actions"><button class="secondary" data-schedule="${esc(j.id)}">Schedule</button><button class="secondary" data-edit="${esc(j.id)}">Edit</button></div></article>`;
+ return `<article class="planner-job"><strong>${esc(j.job_number)}</strong><span>${esc(c?.name||'Customer')} · ${esc(j.status)}</span><span>Completion: ${esc(j.due_date)}</span><button class="secondary" data-edit="${esc(j.id)}">View / Edit</button></article>`;
 }
 function renderPlanner(){
  const start=weekStart(plannerWeekOffset),end=new Date(start);end.setDate(start.getDate()+6);
  const fmt=new Intl.DateTimeFormat('en-ZA',{day:'numeric',month:'short'});
  $('plannerRange').textContent=`${fmt.format(start)} – ${fmt.format(end)} ${end.getFullYear()}`;
- const today=localISO(new Date()),startISO=localISO(start),endISO=localISO(end);
- const active=jobs.filter(j=>j.status!=='Collected');
- const planned=active.filter(j=>j.planned_date>=startISO&&j.planned_date<=endISO);
- const backlog=active.filter(j=>!j.planned_date);
- const overdue=active.filter(j=>j.due_date<today&&j.status!=='Ready for Collection');
- $('plannerSummary').innerHTML=`<div class="planner-pill"><strong>${planned.length}</strong> Scheduled this week</div><div class="planner-pill"><strong>${backlog.length}</strong> Unscheduled</div><div class="planner-pill"><strong>${overdue.length}</strong> Overdue</div>`;
+ const today=localISO(new Date()),a=localISO(start),b=localISO(end);
+ const active=jobs.filter(isProduction);
+ const due=active.filter(j=>j.due_date>=a&&j.due_date<=b);
+ const overdue=active.filter(j=>j.due_date<today);
+ $('plannerSummary').innerHTML=`<div class="planner-pill"><strong>${due.length}</strong> Completing this week</div><div class="planner-pill"><strong>${overdue.length}</strong> Overdue</div>`;
  const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);return d});
  const weekday=new Intl.DateTimeFormat('en-ZA',{weekday:'short'});
- $('plannerDays').innerHTML=days.map(d=>{const iso=localISO(d),dayJobs=planned.filter(j=>j.planned_date===iso).sort((a,b)=>a.job_number.localeCompare(b.job_number));return `<div class="planner-day plan-dropzone ${iso===today?'today':''}" data-plan-date="${iso}"><h3>${weekday.format(d)} ${d.getDate()}</h3><div class="planner-day-count">${dayJobs.length} scheduled</div>${dayJobs.map(planCard).join('')||'<div class="planner-empty">Drop a job here or use Schedule</div>'}</div>`}).join('');
- $('plannerBacklog').innerHTML=backlog.sort((a,b)=>a.due_date.localeCompare(b.due_date)).map(planCard).join('')||'<p class="muted">All active jobs are scheduled.</p>';
- $('plannerOverdue').innerHTML=overdue.sort((a,b)=>a.due_date.localeCompare(b.due_date)).map(j=>`<div class="planner-overdue-row"><div><strong>${esc(j.job_number)}</strong> · ${esc(customers.find(c=>c.id===j.customer_id)?.name||'Customer')}<div class="muted">Promised ${esc(j.due_date)} · Scheduled ${esc(j.planned_date||'Not scheduled')}</div></div><button class="secondary" data-schedule="${esc(j.id)}">Schedule</button></div>`).join('')||'<p class="muted">No overdue jobs.</p>';
-}
-async function setPlannedDate(id,date){
- const j=jobs.find(x=>x.id===id);if(!j)return;
- if(date!==null&&!/^\d{4}-\d{2}-\d{2}$/.test(date)){msg('Choose a valid production date.');return}
- if(j.planned_date===date)return;
- try{check(await db.from('jobs').update({planned_date:date,updated_at:new Date().toISOString()}).eq('id',id));j.planned_date=date;renderPlanner();msg(date?`Scheduled ${j.job_number} for ${date}`:`Moved ${j.job_number} to unscheduled`)}catch(e){msg('Scheduling failed: '+e.message)}
+ $('plannerDays').innerHTML=days.map(d=>{const iso=localISO(d),dayJobs=due.filter(j=>j.due_date===iso);return `<div class="planner-day ${iso===today?'today':''}"><h3>${weekday.format(d)} ${d.getDate()}</h3><div class="planner-day-count">${dayJobs.length} due</div>${dayJobs.map(planCard).join('')||'<div class="planner-empty">No jobs due</div>'}</div>`}).join('');
+ $('plannerOverdue').innerHTML=overdue.map(j=>`<div class="planner-overdue-row"><div><strong>${esc(j.job_number)}</strong> · ${esc(customers.find(c=>c.id===j.customer_id)?.name||'Customer')}<div class="muted">Promised ${esc(j.due_date)} · ${esc(j.status)}</div></div><button class="secondary" data-edit="${esc(j.id)}">Edit</button></div>`).join('')||'<p class="muted">No overdue jobs.</p>';
 }
 $('plannerPrev').onclick=()=>{plannerWeekOffset--;renderPlanner();renderStagePlanner();renderOvenCapacity()};
 $('plannerNext').onclick=()=>{plannerWeekOffset++;renderPlanner();renderStagePlanner();renderOvenCapacity()};
 $('plannerToday').onclick=()=>{plannerWeekOffset=0;renderPlanner();renderStagePlanner();renderOvenCapacity()};
-$('plannerUnscheduled').addEventListener('dragover',e=>{e.preventDefault();e.currentTarget.classList.add('plan-drag-over')});
-document.addEventListener('dragstart',e=>{const card=e.target.closest('[data-drag-job]');if(!card)return;e.dataTransfer.setData('text/plain',card.dataset.dragJob);e.dataTransfer.effectAllowed='move'});
-document.addEventListener('dragover',e=>{const zone=e.target.closest('[data-plan-date],#plannerUnscheduled');if(!zone)return;e.preventDefault();e.dataTransfer.dropEffect='move';zone.classList.add('plan-drag-over')});
-document.addEventListener('dragleave',e=>{const zone=e.target.closest('[data-plan-date],#plannerUnscheduled');if(zone&&!zone.contains(e.relatedTarget))zone.classList.remove('plan-drag-over')});
-document.addEventListener('drop',e=>{const zone=e.target.closest('[data-plan-date],#plannerUnscheduled');if(!zone)return;e.preventDefault();zone.classList.remove('plan-drag-over');const id=e.dataTransfer.getData('text/plain');if(id)setPlannedDate(id,zone.id==='plannerUnscheduled'?null:zone.dataset.planDate)});
-document.addEventListener('dragend',()=>document.querySelectorAll('.plan-drag-over').forEach(el=>el.classList.remove('plan-drag-over')));
-$('scheduleCancel').onclick=()=>$('scheduleModal').classList.add('hide');
-$('scheduleForm').onsubmit=async e=>{e.preventDefault();const id=$('scheduleJobId').value;const date=$('scheduleUnscheduled').checked?null:$('scheduleDate').value;if(!date&&!$('scheduleUnscheduled').checked){msg('Select a production date.');return}await setPlannedDate(id,date);$('scheduleModal').classList.add('hide')};
-$('scheduleUnscheduled').onchange=e=>{$('scheduleDate').disabled=e.target.checked};
-document.addEventListener('click',e=>{const b=e.target.closest('[data-schedule]');if(!b)return;const j=jobs.find(x=>x.id===b.dataset.schedule);if(!j)return;$('scheduleJobId').value=j.id;$('scheduleJobLabel').textContent=`${j.job_number} · Promised ${j.due_date}`;$('scheduleDate').value=j.planned_date||j.due_date;$('scheduleUnscheduled').checked=false;$('scheduleDate').disabled=false;$('scheduleModal').classList.remove('hide')});
-// Phase 3.2: date suggestions are based on weekdays, not public holidays or shop capacity.
-
 function calculatedDailyCapacity(){
  const ovens=Number(ovenSettings.oven_count)||1, cap=Number(ovenSettings.loads_per_oven_per_day)||1;
  const mins=Number(ovenSettings.cycle_minutes)||60, hours=Number(ovenSettings.operating_hours)||8;
@@ -137,7 +120,7 @@ function renderOvenCapacity(){
  $('ovenCycleMinutes').value=ovenSettings.cycle_minutes??60;$('ovenDailyHours').value=ovenSettings.operating_hours??8;
  const cap=calculatedDailyCapacity();
  const start=weekStart(plannerWeekOffset);
- const curing=stagePlans.filter(p=>p.stage==='Curing / QC' && jobs.some(j=>j.id===p.job_id && !['Collected','Ready for Collection'].includes(j.status)));
+ const curing=jobs.filter(isProduction).map(j=>({job_id:j.id,stage:'Curing / QC',planned_date:suggestStageDates(j.due_date)[2]}));
  const days=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(d.getDate()+i);return localISO(d)});
  const total=days.map(day=>{
   const plans=curing.filter(p=>p.planned_date===day);
@@ -157,13 +140,14 @@ function parseDate(iso){const [y,m,d]=iso.split('-').map(Number);return new Date
 function previousBusinessDay(iso,count){const d=parseDate(iso);while(count>0){d.setDate(d.getDate()-1);if(d.getDay()!==0&&d.getDay()!==6)count--}return localISO(d)}
 function suggestStageDates(due){return [3,2,1].map(n=>previousBusinessDay(due,n))}
 function stageFor(j){return stagePlans.filter(p=>p.job_id===j.id)}
-function stageCard(p){const j=jobs.find(x=>x.id===p.job_id);if(!j)return '';const c=customers.find(x=>x.id===j.customer_id);return `<article class="stage-card" draggable="true" data-drag-stage="${esc(p.id)}"><strong>${esc(j.job_number)} · ${esc(p.stage)}</strong><small>${esc(c?.name||'Customer')} · Due ${esc(j.due_date)}</small><button class="secondary" data-edit-stage="${esc(p.id)}">Reschedule</button></article>`}
+function stageCard(p){const j=jobs.find(x=>x.id===p.job_id);if(!j)return '';const c=customers.find(x=>x.id===j.customer_id);return `<article class="stage-card"><strong>${esc(j.job_number)} · ${esc(p.stage)}</strong><small>${esc(c?.name||'Customer')} · Due ${esc(j.due_date)}</small><small>Automatically scheduled from completion date</small></article>`}
 function renderStagePlanner(){
- const active=jobs.filter(j=>j.status!=='Collected');const start=weekStart(plannerWeekOffset);const end=new Date(start);end.setDate(start.getDate()+6);const a=localISO(start),b=localISO(end);
- const stageActive=stagePlans.filter(p=>active.some(j=>j.id===p.job_id));
- $('stageSummary').textContent=`${stageActive.filter(p=>p.planned_date>=a&&p.planned_date<=b).length} stage tasks this week · ${active.filter(j=>!stageActive.some(p=>p.job_id===j.id)).length} jobs without stage dates`;
- $('stageDays').innerHTML=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);const iso=localISO(d);const list=stageActive.filter(p=>p.planned_date===iso);return `<div class="planner-day stage-drop" data-stage-day="${iso}"><h3>${esc(new Intl.DateTimeFormat('en-ZA',{weekday:'short',day:'numeric',month:'short'}).format(d))}</h3><div class="planner-day-count">${list.length} tasks</div>${list.map(stageCard).join('')||'<p class="planner-empty">No stages planned</p>'}</div>`}).join('');
- $('stageUnplanned').innerHTML=active.filter(j=>!stageActive.some(p=>p.job_id===j.id)).map(j=>`<div class="stage-unplanned"><strong>${esc(j.job_number)}</strong> · Due ${esc(j.due_date)} <button class="secondary" data-generate-stages="${esc(j.id)}">Suggest stages</button></div>`).join('')||'<p class="muted">All active jobs have a stage schedule.</p>';
+ const active=jobs.filter(isProduction),start=weekStart(plannerWeekOffset),end=new Date(start);end.setDate(start.getDate()+6);
+ const a=localISO(start),b=localISO(end);
+ const stageIndex={'Pretreatment':0,'Powder Coating':1,'Curing / QC':2};
+ const outstanding=active.flatMap(j=>{const idx=stageIndex[j.status];const dates=suggestStageDates(j.due_date);return stageNames.slice(idx).map((stage,i)=>({job_id:j.id,stage,planned_date:dates[idx+i]}))});
+ $('stageSummary').textContent=`${outstanding.filter(p=>p.planned_date>=a&&p.planned_date<=b).length} outstanding production tasks this week · Dates based on promised completion`;
+ $('stageDays').innerHTML=Array.from({length:7},(_,i)=>{const d=new Date(start);d.setDate(start.getDate()+i);const iso=localISO(d),list=outstanding.filter(p=>p.planned_date===iso);return `<div class="planner-day"><h3>${esc(new Intl.DateTimeFormat('en-ZA',{weekday:'short',day:'numeric',month:'short'}).format(d))}</h3><div class="planner-day-count">${list.length} outstanding</div>${list.map(stageCard).join('')||'<p class="planner-empty">No outstanding stages</p>'}</div>`}).join('');
 }
 async function generateStages(j,confirmExisting=false){
  const existing=stageFor(j);
@@ -186,7 +170,7 @@ document.addEventListener('dragover',e=>{if(e.target.closest('[data-stage-day]')
 document.addEventListener('drop',e=>{const zone=e.target.closest('[data-stage-day]');if(!zone)return;const id=e.dataTransfer.getData('application/x-endura-stage');if(id){e.preventDefault();e.stopPropagation();updateStage(id,zone.dataset.stageDay)}});
 function renderJobList(){
  const q=($('jobSearch')?.value||'').trim().toLowerCase();
- const visible=jobs.filter(j=>j.status!=='Collected').filter(j=>{const c=customers.find(c=>c.id===j.customer_id);const lines=items.filter(i=>i.job_id===j.id);return [j.job_number,j.status,c?.name,c?.phone,...lines.flatMap(i=>[i.description,i.colour])].join(' ').toLowerCase().includes(q)});
+ const visible=jobs.filter(isProduction).filter(j=>{const c=customers.find(c=>c.id===j.customer_id);const lines=items.filter(i=>i.job_id===j.id);return [j.job_number,j.status,c?.name,c?.phone,...lines.flatMap(i=>[i.description,i.colour])].join(' ').toLowerCase().includes(q)});
  $('jobs').innerHTML=visible.map(jobHTML).join('')||'<p class="empty">No matching active jobs.</p>';
 }
 $('jobSearch').addEventListener('input',renderJobList);
@@ -197,7 +181,7 @@ function openEdit(id){const j=jobs.find(x=>x.id===id);if(!j)return;editRemoved=n
 function closeEdit(){$('editModal').classList.add('hide');editRemoved.clear()}
 $('closeEdit').onclick=closeEdit;$('cancelEdit').onclick=closeEdit;$('editAddItem').onclick=()=>editItemRow();
 $('editModal').addEventListener('click',e=>{if(e.target===$('editModal'))closeEdit()});document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('editModal').classList.contains('hide'))closeEdit()});
-$('editJobForm').onsubmit=async e=>{e.preventDefault();const button=$('saveEdit');button.disabled=true;try{const id=$('editJobId').value;const old=jobs.find(j=>j.id===id);if(!old)throw Error('Job no longer exists. Refresh first.');const rows=[...$('editItems').children].map(el=>({id:el.dataset.itemId||null,description:el.querySelector('.e-desc').value.trim(),quantity:Number(el.querySelector('.e-qty').value),colour:el.querySelector('.e-colour').value.trim(),dimensions:el.querySelector('.e-dim').value.trim(),price:Number(el.querySelector('.e-price').value)||0}));if(!rows.length||rows.some(r=>!r.description||!Number.isInteger(r.quantity)||r.quantity<1||r.price<0))throw Error('Each item needs a description, positive whole-number quantity and valid price.');const nextNumber=$('editJobNo').value.trim();if(!nextNumber)throw Error('Enter a job number.');if(jobs.some(j=>j.id!==id&&j.job_number.toLowerCase()===nextNumber.toLowerCase()))throw Error('That job number already exists.');const due=$('editDue').value;if(!/^\d{4}-\d{2}-\d{2}$/.test(due))throw Error('Choose a valid due date.');const notes=$('editNotes').value;check(await db.from('jobs').update({job_number:nextNumber,due_date:due,notes,updated_at:new Date().toISOString()}).eq('id',id));for(const row of rows){const {id:itemId,...data}=row;if(itemId)check(await db.from('job_items').update(data).eq('id',itemId).eq('job_id',id));else check(await db.from('job_items').insert({...data,job_id:id}))}if(editRemoved.size)check(await db.from('job_items').delete().eq('job_id',id).in('id',[...editRemoved]));closeEdit();await load();msg('Job card and items updated in Supabase.');}catch(err){msg('Save failed: '+err.message+' Refresh and review before retrying.')}finally{button.disabled=false}};
+$('editJobForm').onsubmit=async e=>{e.preventDefault();const button=$('saveEdit');button.disabled=true;try{const id=$('editJobId').value;const old=jobs.find(j=>j.id===id);if(!old)throw Error('Job no longer exists. Refresh first.');const rows=[...$('editItems').children].map(el=>({id:el.dataset.itemId||null,description:el.querySelector('.e-desc').value.trim(),quantity:Number(el.querySelector('.e-qty').value),colour:el.querySelector('.e-colour').value.trim(),dimensions:el.querySelector('.e-dim').value.trim(),price:Number(el.querySelector('.e-price').value)||0}));if(!rows.length||rows.some(r=>!r.description||!Number.isInteger(r.quantity)||r.quantity<1||r.price<0))throw Error('Each item needs a description, positive whole-number quantity and valid price.');const nextNumber=$('editJobNo').value.trim();if(!nextNumber)throw Error('Enter a job number.');if(jobs.some(j=>j.id!==id&&j.job_number.toLowerCase()===nextNumber.toLowerCase()))throw Error('That job number already exists.');const due=$('editDue').value;if(!/^\d{4}-\d{2}-\d{2}$/.test(due))throw Error('Choose a valid due date.');const notes=$('editNotes').value;check(await db.from('jobs').update({job_number:nextNumber,due_date:due,notes,updated_at:new Date().toISOString()}).eq('id',id));for(const row of rows){const {id:itemId,...data}=row;if(itemId)check(await db.from('job_items').update(data).eq('id',itemId).eq('job_id',id));else check(await db.from('job_items').insert({...data,job_id:id}))}if(editRemoved.size)check(await db.from('job_items').delete().eq('job_id',id).in('id',[...editRemoved]));try{const dates=suggestStageDates(due);check(await db.from('job_stage_schedule').upsert(stageNames.map((stage,i)=>({job_id:id,stage,planned_date:dates[i]})),{onConflict:'job_id,stage'}))}catch(err){msg('Job saved; stage schedule sync failed: '+err.message)}closeEdit();await load();msg('Job card and items updated in Supabase.');}catch(err){msg('Save failed: '+err.message+' Refresh and review before retrying.')}finally{button.disabled=false}};
 async function deleteJobCard(id){
  const j=jobs.find(x=>x.id===id);
  if(!j)return;
@@ -261,7 +245,7 @@ async function refreshPushStatus(){
   const sub=reg?await reg.pushManager.getSubscription():null;
   const enabled=Boolean(sub)&&Notification.permission==='granted';
   label.textContent=enabled?'Push enabled on this device.':'Push is not enabled on this device.';
-  panel.classList.toggle('hide',enabled);
+  panel.classList.toggle('hide',enabled||localStorage.getItem('endura_push_disabled')==='yes'||Notification.permission==='denied');
  }catch(e){label.textContent=e.message;panel.classList.remove('hide')}
 }
 $('pushEnable').onclick=async()=>{
@@ -274,11 +258,11 @@ $('pushEnable').onclick=async()=>{
  let sub=await reg.pushManager.getSubscription();
  if(sub){const key=new Uint8Array(sub.options.applicationServerKey||[]);if(key.length&&!key.every((b,i)=>b===decodeVapid(publicKey)[i])){await sub.unsubscribe();sub=null}}
  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeVapid(publicKey)});
- await pushCall({action:'subscribe',subscription:sub.toJSON()});msg('Push notifications enabled.');await refreshPushStatus();
+ await pushCall({action:'subscribe',subscription:sub.toJSON()});localStorage.removeItem('endura_push_disabled');msg('Push notifications enabled.');await refreshPushStatus();
  }catch(e){msg('Push setup: '+e.message);await refreshPushStatus()}
 };
 $('pushDisable').onclick=async()=>{
- try{const reg=await navigator.serviceWorker.getRegistration('./');const sub=reg?await reg.pushManager.getSubscription():null;if(sub){await pushCall({action:'unsubscribe',endpoint:sub.endpoint});await sub.unsubscribe()}msg('Push disabled on this device.');await refreshPushStatus()}catch(e){msg('Disable failed: '+e.message)}
+ try{const reg=await navigator.serviceWorker.getRegistration('./');const sub=reg?await reg.pushManager.getSubscription():null;if(sub){await pushCall({action:'unsubscribe',endpoint:sub.endpoint});await sub.unsubscribe()}localStorage.setItem('endura_push_disabled','yes');msg('Push disabled on this device.');await refreshPushStatus()}catch(e){msg('Disable failed: '+e.message)}
 };
 $('pushTest').onclick=async()=>{try{const r=await pushCall({action:'test'});msg(`Test queued for ${r.queued||0} subscription(s). It will be delivered by the dispatcher.`)}catch(e){msg('Test failed: '+e.message)}};
 
